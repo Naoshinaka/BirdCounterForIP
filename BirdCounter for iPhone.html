@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>開票音声カウンター for iPhone</title>
+    <!-- iOS PWA対応設定 -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="開票カウンター">
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        @keyframes flash-green {
+            0% { background-color: rgba(34, 197, 94, 0.6); }
+            100% { background-color: transparent; }
+        }
+        .animate-flash { animation: flash-green 0.8s ease-out; }
+        /* モバイル向けにスクロールを滑らかに */
+        .terminal-scroll { -webkit-overflow-scrolling: touch; }
+        [v-cloak] { display: none; }
+        /* タップ時のハイライトを抑制 */
+        button { -webkit-tap-highlight-color: transparent; }
+    </style>
+</head>
+<body class="bg-slate-900 text-slate-100 min-h-screen font-sans antialiased overflow-x-hidden">
+    <div id="app" class="max-w-5xl mx-auto p-3 md:p-6 pb-20" v-cloak>
+        <!-- ヘッダー：iPhoneのノッチ対応 -->
+        <header class="flex justify-between items-center mb-6 pt-2 border-b border-slate-700 pb-4">
+            <div class="flex items-center gap-2">
+                <i class="fas fa-microphone-lines text-blue-500 text-xl"></i>
+                <h1 class="text-lg font-bold tracking-tight">開票音声カウンター</h1>
+            </div>
+            <div class="flex gap-2">
+                <button @click="downloadCSV" class="text-xs bg-slate-800 p-2 rounded-md border border-slate-700">
+                    <i class="fas fa-download"></i>
+                </button>
+                <button @click="confirmReset" class="text-xs bg-red-900/30 text-red-400 p-2 rounded-md border border-red-900/50">
+                    <i class="fas fa-rotate"></i>
+                </button>
+            </div>
+        </header>
+
+        <!-- メインパネル -->
+        <div class="space-y-4">
+            <!-- 音声コントロール：iPhoneで押しやすい巨大ボタン -->
+            <section class="bg-slate-800 rounded-2xl p-4 shadow-xl border border-slate-700">
+                <div class="flex items-center justify-between mb-3">
+                    <span :class="statusBadgeClass" class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-wider">
+                        {{ statusLabel }}
+                    </span>
+                    <span class="text-[10px] text-slate-500 font-mono">{{ lastRecognitionTime }}</span>
+                </div>
+
+                <div class="bg-slate-950 rounded-xl p-3 mb-4 h-20 overflow-y-auto border border-slate-800 text-sm">
+                    <p v-if="interimTranscript" class="text-blue-400 animate-pulse">{{ interimTranscript }}</p>
+                    <p v-else-if="isListening" class="text-slate-500 italic text-xs">音声を待機中...（候補者名を話してください）</p>
+                    <p v-else class="text-slate-600 italic text-xs">停止中：開始ボタンを押してください</p>
+                </div>
+
+                <div class="grid grid-cols-2 gap-4">
+                    <button @click="toggleListening" 
+                        :class="isListening ? 'bg-red-600 active:bg-red-700' : 'bg-blue-600 active:bg-blue-700'" 
+                        class="h-16 rounded-2xl font-bold transition-all shadow-lg flex flex-col items-center justify-center gap-1">
+                        <i :class="isListening ? 'fas fa-stop' : 'fas fa-play'"></i>
+                        <span class="text-xs">{{ isListening ? '認識終了' : '認識開始' }}</span>
+                    </button>
+                    <button @click="togglePause" :disabled="!isListening" 
+                        :class="isPaused ? 'bg-amber-600 active:bg-amber-700' : 'bg-slate-700 active:bg-slate-600'" 
+                        class="h-16 rounded-2xl font-bold transition-all flex flex-col items-center justify-center gap-1 disabled:opacity-30">
+                        <i :class="isPaused ? 'fas fa-play' : 'fas fa-pause'"></i>
+                        <span class="text-xs">{{ isPaused ? '再開' : '一時停止' }}</span>
+                    </button>
+                </div>
+            </section>
+
+            <!-- 集計サマリー -->
+            <div class="bg-slate-800/50 p-4 rounded-2xl border border-slate-700 flex justify-between items-center">
+                <div>
+                    <p class="text-slate-400 text-xs uppercase font-bold tracking-widest">現在の総得票</p>
+                    <p class="text-3xl font-black text-white">{{ totalVotes }} <span class="text-sm font-normal text-slate-500">票</span></p>
+                </div>
+                <button @click="openAddModal" class="bg-emerald-600 active:bg-emerald-700 text-white h-12 px-4 rounded-xl font-bold shadow-lg flex items-center gap-2">
+                    <i class="fas fa-user-plus"></i>
+                    <span class="text-sm">追加</span>
+                </button>
+            </div>
+
+            <!-- 候補者リスト：モバイルで見やすい1列/2列切り替え -->
+            <div class="grid grid-cols-1 gap-3">
+                <div v-for="candidate in candidates" :key="candidate.id" 
+                     :class="{'animate-flash border-emerald-500': candidate.justCounted}"
+                     class="bg-slate-800 border border-slate-700 rounded-2xl p-4 shadow-lg transition-all duration-300">
+                    <div class="flex justify-between items-center mb-3">
+                        <div class="flex-1 overflow-hidden">
+                            <h3 class="text-lg font-bold truncate">{{ candidate.name }}</h3>
+                            <div class="flex gap-1 overflow-x-auto no-scrollbar">
+                                <span v-for="k in candidate.keywords" class="text-[9px] bg-slate-900 px-1.5 py-0.5 rounded text-slate-400 whitespace-nowrap">{{ k }}</span>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-3 ml-4">
+                            <span class="text-3xl font-mono font-bold text-blue-400">{{ candidate.votes }}</span>
+                            <button @click="openEditModal(candidate)" class="text-slate-500 p-2">
+                                <i class="fas fa-ellipsis-v"></i>
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div class="flex items-center gap-2">
+                        <button @click="adjustVote(candidate, -1)" class="flex-1 h-12 rounded-xl bg-slate-900 border border-slate-700 flex items-center justify-center active:bg-slate-700 transition">-1</button>
+                        <button @click="adjustVote(candidate, 1)" class="flex-1 h-12 rounded-xl bg-slate-900 border border-slate-700 flex items-center justify-center active:bg-slate-700 transition">+1</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ログエリア（iPhoneでは少し小さめに配置） -->
+            <section class="bg-slate-950/50 rounded-2xl border border-slate-800 flex flex-col h-40">
+                <div class="px-3 py-2 border-b border-slate-800 flex justify-between items-center">
+                    <h2 class="text-[9px] font-bold uppercase text-slate-500">Live Logs</h2>
+                    <button @click="clearLogs" class="text-[9px] text-slate-600">CLEAR</button>
+                </div>
+                <div class="flex-1 overflow-y-auto p-2 font-mono text-[10px] space-y-1 terminal-scroll" id="log-container">
+                    <div v-for="log in logs" :key="log.id" :class="log.color">
+                        <span class="opacity-40">{{ log.time }}</span> {{ log.msg }}
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <!-- モーダル各種（iPhoneのキーボード被りを考慮） -->
+        <div v-if="showModal" class="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-4 bg-slate-950/90 backdrop-blur-sm">
+            <div class="bg-slate-800 border border-slate-700 rounded-t-3xl sm:rounded-2xl shadow-2xl w-full max-w-md p-6 pb-10">
+                <div class="w-12 h-1.5 bg-slate-700 rounded-full mx-auto mb-6 sm:hidden"></div>
+                <h2 class="text-xl font-bold mb-4">{{ modalMode === 'add' ? '候補者の追加' : '候補者の編集' }}</h2>
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-xs font-medium text-slate-500 mb-1 italic">Candidate Name</label>
+                        <input v-model="form.name" type="text" placeholder="氏名" class="w-full bg-slate-900 border border-slate-600 rounded-xl px-4 py-3 focus:ring-2 focus:ring-blue-500 outline-none">
+                    </div>
+                    <div>
+                        <label class="block text-xs font-medium text-slate-500 mb-1 italic">Keywords (comma separated)</label>
+                        <input v-model="form.keywordsStr" type="text" placeholder="読み、キーワード" class="w-full bg-slate-900 border border-slate-600 rounded-xl px-4 py-3 focus:ring-2 focus:ring-blue-500 outline-none">
+                    </div>
+                </div>
+                <div class="flex gap-3 mt-8">
+                    <button @click="closeModal" class="flex-1 bg-slate-700 py-3 rounded-xl font-bold">キャンセル</button>
+                    <button @click="saveCandidate" class="flex-1 bg-blue-600 py-3 rounded-xl font-bold">保存</button>
+                </div>
+                <button v-if="modalMode === 'edit'" @click="deleteCandidate" class="w-full mt-6 text-red-500 text-xs">候補者を削除する</button>
+            </div>
+        </div>
+
+        <!-- リセット確認 -->
+        <div v-if="showResetModal" class="fixed inset-0 z-50 flex items-center justify-center p-6 bg-slate-950/90 backdrop-blur-md">
+            <div class="bg-slate-800 border border-slate-700 rounded-3xl p-6 text-center max-w-xs">
+                <h2 class="text-lg font-bold mb-4">全データをリセット？</h2>
+                <div class="flex gap-3">
+                    <button @click="showResetModal = false" class="flex-1 bg-slate-700 py-3 rounded-xl font-bold text-sm">戻る</button>
+                    <button @click="executeReset" class="flex-1 bg-red-600 py-3 rounded-xl font-bold text-sm">実行</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/vue/3.3.4/vue.global.prod.min.js"></script>
+    <script>
+        const { createApp, ref, computed, watch, onMounted, nextTick } = Vue;
+
+        createApp({
+            setup() {
+                const candidates = ref([]);
+                const logs = ref([]);
+                const isListening = ref(false);
+                const isPaused = ref(false);
+                const interimTranscript = ref("");
+                const showModal = ref(false);
+                const modalMode = ref('add');
+                const showResetModal = ref(false);
+                const currentCandidateId = ref(null);
+                const lastRecognitionTime = ref("--:--:--");
+                
+                const form = ref({ name: "", keywordsStr: "" });
+
+                let recognition = null;
+                let restartTimer = null;
+
+                const loadData = () => {
+                    const saved = localStorage.getItem('election_counter_ios_v1');
+                    if (saved) candidates.value = JSON.parse(saved);
+                    else {
+                        candidates.value = [
+                            { id: 1, name: "山田 太郎", keywords: ["やまだ", "たろう"], votes: 0, justCounted: false },
+                            { id: 2, name: "佐藤 花子", keywords: ["さとう", "はなこ"], votes: 0, justCounted: false }
+                        ];
+                    }
+                };
+
+                const saveData = () => localStorage.setItem('election_counter_ios_v1', JSON.stringify(candidates.value));
+                watch(candidates, saveData, { deep: true });
+
+                const addLog = (msg, type = 'info') => {
+                    const colors = { info: 'text-slate-400', success: 'text-emerald-400', error: 'text-red-400', warning: 'text-amber-400', manual: 'text-blue-400' };
+                    logs.value.push({ id: Date.now(), time: new Date().toLocaleTimeString('ja-JP', { hour12: false }), msg, color: colors[type] });
+                    nextTick(() => {
+                        const container = document.getElementById('log-container');
+                        if (container) container.scrollTop = container.scrollHeight;
+                    });
+                    if (logs.value.length > 50) logs.value.shift();
+                };
+
+                const initSpeech = () => {
+                    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+                    if (!SpeechRecognition) {
+                        addLog("SpeechRecognition非対応", "error");
+                        return;
+                    }
+
+                    recognition = new SpeechRecognition();
+                    recognition.lang = 'ja-JP';
+                    recognition.continuous = true;
+                    recognition.interimResults = true;
+
+                    recognition.onstart = () => {
+                        isListening.value = true;
+                        lastRecognitionTime.value = new Date().toLocaleTimeString();
+                    };
+
+                    recognition.onerror = (e) => {
+                        if (e.error === 'not-allowed') addLog("マイク許可が必要です", "error");
+                    };
+
+                    recognition.onend = () => {
+                        // iPhoneでは頻繁にエンドイベントが発生するため、フラグがONなら即再開
+                        if (isListening.value) {
+                            clearTimeout(restartTimer);
+                            restartTimer = setTimeout(() => {
+                                try { recognition.start(); } catch(err) {}
+                            }, 300);
+                        }
+                    };
+
+                    recognition.onresult = (event) => {
+                        if (isPaused.value) return;
+                        let finalTranscript = "";
+                        for (let i = event.resultIndex; i < event.results.length; ++i) {
+                            if (event.results[i].isFinal) finalTranscript += event.results[i][0].transcript;
+                            else interimTranscript.value = event.results[i][0].transcript;
+                        }
+                        if (finalTranscript) {
+                            processTranscript(finalTranscript);
+                            interimTranscript.value = "";
+                        }
+                    };
+                };
+
+                const processTranscript = (text) => {
+                    const cleanText = text.replace(/\s+/g, "");
+                    let matched = false;
+                    candidates.value.forEach(c => {
+                        const targets = [c.name, ...c.keywords];
+                        if (targets.some(t => t && cleanText.includes(t))) {
+                            c.votes++;
+                            c.justCounted = true;
+                            matched = true;
+                            addLog(`検知: ${c.name}`, "success");
+                            setTimeout(() => c.justCounted = false, 800);
+                        }
+                    });
+                    if (!matched) addLog(`不明: ${cleanText}`, "info");
+                };
+
+                const toggleListening = () => {
+                    if (isListening.value) {
+                        isListening.value = false;
+                        recognition.stop();
+                        addLog("停止しました");
+                    } else {
+                        // iPhone対策: ユーザー操作直後に開始
+                        try {
+                            recognition.start();
+                            addLog("認識を開始します...");
+                        } catch(e) {
+                            recognition.stop();
+                            setTimeout(() => recognition.start(), 100);
+                        }
+                    }
+                };
+
+                const togglePause = () => { isPaused.value = !isPaused.value; };
+                const adjustVote = (c, d) => {
+                    c.votes = Math.max(0, c.votes + d);
+                    addLog(`${c.name} ${d > 0 ? '+1' : '-1'}`, "manual");
+                };
+
+                const totalVotes = computed(() => candidates.value.reduce((s, c) => s + c.votes, 0));
+                
+                const openAddModal = () => {
+                    modalMode.value = 'add';
+                    form.value = { name: "", keywordsStr: "" };
+                    showModal.value = true;
+                };
+
+                const openEditModal = (c) => {
+                    modalMode.value = 'edit';
+                    currentCandidateId.value = c.id;
+                    form.value = { name: c.name, keywordsStr: c.keywords.join(', ') };
+                    showModal.value = true;
+                };
+
+                const saveCandidate = () => {
+                    if (!form.value.name.trim()) return;
+                    const ks = form.value.keywordsStr.split(',').map(k => k.trim()).filter(k => k);
+                    if (modalMode.value === 'add') {
+                        candidates.value.push({ id: Date.now(), name: form.value.name, keywords: ks, votes: 0, justCounted: false });
+                    } else {
+                        const c = candidates.value.find(c => c.id === currentCandidateId.value);
+                        if (c) { Object.assign(c, { name: form.value.name, keywords: ks }); }
+                    }
+                    showModal.value = false;
+                };
+
+                const deleteCandidate = () => {
+                    candidates.value = candidates.value.filter(c => c.id !== currentCandidateId.value);
+                    showModal.value = false;
+                };
+
+                const executeReset = () => {
+                    candidates.value.forEach(c => c.votes = 0);
+                    logs.value = [];
+                    showResetModal.value = false;
+                };
+
+                const downloadCSV = () => {
+                    const bom = new Uint8Array([0xEF, 0xBB, 0xBF]);
+                    let csv = "候補者,キーワード,得票\n";
+                    candidates.value.forEach(c => csv += `"${c.name}","${c.keywords.join('/')}",${c.votes}\n`);
+                    const blob = new Blob([bom, csv], { type: "text/csv" });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = `開票_${new Date().getTime()}.csv`;
+                    a.click();
+                };
+
+                const statusLabel = computed(() => isListening.value ? (isPaused.value ? "PAUSED" : "REC NOW") : "READY");
+                const statusBadgeClass = computed(() => isListening.value ? (isPaused.value ? "bg-amber-600" : "bg-red-600 animate-pulse") : "bg-slate-700");
+
+                onMounted(() => {
+                    loadData();
+                    initSpeech();
+                });
+
+                return {
+                    candidates, logs, isListening, isPaused, interimTranscript, showModal, modalMode, form, totalVotes, showResetModal, statusLabel, statusBadgeClass, lastRecognitionTime,
+                    toggleListening, togglePause, adjustVote, openAddModal, openEditModal, saveCandidate, deleteCandidate, closeModal: () => showModal.value = false, confirmReset: () => showResetModal.value = true, executeReset, downloadCSV, clearLogs: () => logs.value = []
+                };
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>
